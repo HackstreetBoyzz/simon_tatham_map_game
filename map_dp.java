@@ -445,3 +445,133 @@ class BitmaskDPSolver {
     public int  getDpTableSize()      { return statesExplored; }
 }
 
+// Auto Solver
+class AutoSolver {
+    private final GameGraph       graph;
+    private final BitmaskDPSolver solver;
+
+    private Map<Integer, Integer> fullSolution  = null;
+    private final List<int[]>     moveSequence  = new ArrayList<>();
+    private int                   moveIndex     = 0;
+    private final List<String>    moveLog       = new ArrayList<>();
+
+    public AutoSolver(GameGraph graph) {
+        this.graph  = graph;
+        this.solver = new BitmaskDPSolver(graph);
+    }
+
+    public boolean initialize() {
+        printBanner();
+        long t0 = System.currentTimeMillis();
+        fullSolution = solver.solve();
+        long elapsed = System.currentTimeMillis() - t0;
+        printSolveStats(elapsed);
+
+        if (fullSolution == null) {
+            System.out.println("[AUTO] DP returned null - unsolvable.");
+            return false;
+        }
+
+        // Build move list
+        for (Region r : graph.getRegions()) {
+            if (!r.isLocked) {
+                Integer c = fullSolution.get(r.id);
+                if (c != null && c != -1) moveSequence.add(new int[]{ r.id, c });
+            }
+        }
+
+        System.out.printf("%n[AUTO] %d moves queued for playback%n", moveSequence.size());
+        System.out.println("-----------------------------------------------------------------");
+        return true;
+    }
+
+    private void printBanner() {
+        System.out.println("\n-----------------------------------------------------------------");
+        System.out.println("  BITMASK DP AUTO-SOLVER");
+        System.out.println("  State   : dp[mask]  (bitmask over free regions)");
+        System.out.println("  Base    : dp[0] = true");
+        System.out.println("  Trans   : dp[mask] -> dp[mask|(1<<v)] for valid color v");
+        System.out.println("  Goal    : dp[(1<<n)-1] = true");
+        System.out.println("  Heurist : MRV - color region with fewest legal choices first");
+        System.out.println("-----------------------------------------------------------------");
+    }
+
+    private void printSolveStats(long elapsed) {
+        int n     = solver.getFreeCount();
+        int total = solver.getTotalStates();
+        System.out.printf("%n--- DP SOLVE STATISTICS -------------------------------------%n");
+        System.out.printf("  Free regions (n)          : %-6d%n", n);
+        System.out.printf("  State space size (2^n)    : %-12s%n",
+            total < 0 ? "fallback" : String.valueOf(total));
+        System.out.printf("  DP states explored        : %-10d%n", solver.getStatesExplored());
+        System.out.printf("  States deduped (skipped)  : %-10d%n", solver.getStatesSkipped());
+        System.out.printf("  Color (region,col) trials : %-10d%n", solver.getColorTrials());
+        System.out.printf("  Color rejections          : %-10d (%.1f%% pruned)%n",
+            solver.getColorRejections(),
+            solver.getColorTrials()==0 ? 0.0 : 100.0*solver.getColorRejections()/solver.getColorTrials());
+        System.out.printf("  Reconstruction steps      : %-10d%n", solver.getReconstructSteps());
+        System.out.printf("  Wall-clock solve time     : %-6d ms%n", elapsed);
+        System.out.printf("  Solution found            : %-6s%n",
+            fullSolution != null ? "YES" : "NO");
+        System.out.printf("-------------------------------------------------------------%n");
+    }
+
+    public int[] applyNextMove() {
+        if (moveIndex >= moveSequence.size()) return null;
+
+        int[] move  = moveSequence.get(moveIndex++);
+        int rid     = move[0];
+        int color   = move[1];
+        graph.getRegions().get(rid).color = color;
+
+        int neighborCount  = graph.getNeighbors(rid).size();
+        int legalRemaining = graph.availableColors(rid).size();
+        String log = String.format(
+            "Move %3d/%3d | Region %2d -> Color %d | Adj regions: %d | Free colors after: %d | Conflict: %s",
+            moveIndex, moveSequence.size(), rid, color + 1,
+            neighborCount, legalRemaining,
+            graph.inConflict(rid) ? "YES" : "none"
+        );
+        moveLog.add(log);
+        System.out.println("[MOVE] " + log);
+        return move;
+    }
+
+    public boolean isDone()          { return moveIndex >= moveSequence.size(); }
+    public int     getMoveIndex()    { return moveIndex; }
+    public int     getTotalMoves()   { return moveSequence.size(); }
+    public List<String> getMoveLog() { return moveLog; }
+
+    public boolean isPuzzleSolved() {
+        for (Region r : graph.getRegions())
+            if (r.color == -1 || graph.inConflict(r.id)) return false;
+        return true;
+    }
+
+    public BitmaskDPSolver getSolver() { return solver; }
+
+    public void printFinalStats() {
+        long conflicts = graph.getRegions().stream().filter(r -> graph.inConflict(r.id)).count();
+        System.out.println("\n-----------------------------------------------------------------");
+        System.out.println("  FINAL COMPARISON STATISTICS");
+        System.out.println("-----------------------------------------------------------------");
+        System.out.printf("  %-30s : %d%n", "Total regions",            graph.getRegions().size());
+        System.out.printf("  %-30s : %d%n", "Locked (pre-colored)",     graph.getRegions().stream().filter(r->r.isLocked).count());
+        System.out.printf("  %-30s : %d%n", "Free regions solved by DP",solver.getFreeCount());
+        System.out.printf("  %-30s : %d%n", "Colors available (k)",     graph.getNumColors());
+        System.out.printf("  %-30s : %d / %s%n","DP states explored / 2^n",
+            solver.getStatesExplored(),
+            solver.getTotalStates() < 0 ? "fallback" : String.valueOf(solver.getTotalStates()));
+        System.out.printf("  %-30s : %d%n", "State dedup saves",        solver.getStatesSkipped());
+        System.out.printf("  %-30s : %d%n", "Total color trials",       solver.getColorTrials());
+        System.out.printf("  %-30s : %d%n", "Color rejections (pruned)",solver.getColorRejections());
+        System.out.printf("  %-30s : %.1f%%%n","MRV pruning efficiency",
+            solver.getColorTrials()==0 ? 0.0 : 100.0*solver.getColorRejections()/solver.getColorTrials());
+        System.out.printf("  %-30s : %d%n", "Reconstruction steps",    solver.getReconstructSteps());
+        System.out.printf("  %-30s : %d ms%n","DP solve time",          solver.getSolveTimeMs());
+        System.out.printf("  %-30s : %d%n", "Moves applied",           moveSequence.size());
+        System.out.printf("  %-30s : %d%n", "Conflicts remaining",     conflicts);
+        System.out.printf("  %-30s : %s%n", "Puzzle valid",            isPuzzleSolved() ? "YES" : "NO");
+        System.out.println("-----------------------------------------------------------------");
+    }
+}
