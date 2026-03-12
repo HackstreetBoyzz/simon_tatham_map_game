@@ -187,3 +187,175 @@ class GameGraph {
     public Set<Integer>   getNeighbors(int rid)  { return adj.get(rid); }
     public int            getNumColors()          { return numColors; }
 }
+
+// Backtracking Solver
+class BacktrackingSolver {
+
+    private final GameGraph    graph;
+    private final int          numColors;
+
+    // Stats
+    private int  colorTrials      = 0;  // total (region, color) pairs tried
+    private int  colorRejections  = 0;  // pairs rejected by isSafe check
+    private int  backtrackCount   = 0;  // times we undid a color assignment
+    private int  callDepth        = 0;  // max recursion depth reached
+    private int  maxDepthReached  = 0;
+    private long solveTimeMs      = 0;
+
+    // Solution: regionId -> color (0-indexed)
+    private Map<Integer, Integer> solution = null;
+
+    // Ordered list of free region IDs to color
+    private List<Integer> freeIds;
+    private int           n;
+
+    // Move sequence for step-by-step playback: each int[] = {regionId, color}
+    private final List<int[]> moveSequence = new ArrayList<>();
+
+    public BacktrackingSolver(GameGraph graph) {
+        this.graph     = graph;
+        this.numColors = graph.getNumColors();
+    }
+
+    public Map<Integer, Integer> solve() {
+        solution       = null;
+        colorTrials    = 0;
+        colorRejections= 0;
+        backtrackCount = 0;
+        maxDepthReached= 0;
+        moveSequence.clear();
+
+        long t0 = System.currentTimeMillis();
+        List<Region> regions = graph.getRegions();
+
+        // Pre-check: locked regions must not already conflict
+        for (Region r : regions) {
+            if (r.color == -1) continue;
+            for (int nbId : graph.getNeighbors(r.id)) {
+                if (regions.get(nbId).color == r.color) {
+                    System.out.printf("[BT] PRE-CHECK FAIL: Region %d conflicts Region %d%n", r.id, nbId);
+                    solveTimeMs = System.currentTimeMillis() - t0;
+                    return null;
+                }
+            }
+        }
+
+        // Collect free (uncolored, unlocked) regions
+        freeIds = new ArrayList<>();
+        for (Region r : regions)
+            if (!r.isLocked && r.color == -1) freeIds.add(r.id);
+        n = freeIds.size();
+
+        // Initialize color array
+        int[] colorArray = new int[n];
+        Arrays.fill(colorArray, -1);
+
+        printBanner();
+
+        // Start backtracking
+        boolean found = backtrack(colorArray, 0);
+
+        solveTimeMs = System.currentTimeMillis() - t0;
+        printSolveStats();
+
+        if (!found) return null;
+
+        // Build full solution map
+        solution = new HashMap<>();
+        for (Region r : regions) solution.put(r.id, r.color);
+        for (int i = 0; i < n; i++) solution.put(freeIds.get(i), colorArray[i]);
+
+        // Build move sequence
+        for (int i = 0; i < n; i++)
+            moveSequence.add(new int[]{ freeIds.get(i), colorArray[i] });
+
+        return solution;
+    }
+
+    private boolean isSafe(int regionId, int color, int[] colorArray) {
+        for (int neighborId : graph.getNeighbors(regionId)) {
+            Region neighbor = graph.getRegions().get(neighborId);
+            int neighborColor;
+
+            if (neighbor.isLocked || neighbor.color != -1) {
+                neighborColor = neighbor.color;
+            } else {
+                int idx = freeIds.indexOf(neighborId);
+                if (idx == -1) continue;
+                neighborColor = colorArray[idx];
+            }
+
+            if (neighborColor == color) return false;  // conflict
+        }
+        return true;  // safe
+    }
+
+    private boolean backtrack(int[] colorArray, int index) {
+        // Base case
+        if (index == n) return true;
+
+        callDepth++;
+        if (callDepth > maxDepthReached) maxDepthReached = callDepth;
+
+        int regionId = freeIds.get(index);
+
+        for (int c = 0; c < numColors; c++) {
+            colorTrials++;
+
+            if (isSafe(regionId, c, colorArray)) {
+                colorArray[index] = c;
+
+                if (backtrack(colorArray, index + 1)) {
+                    callDepth--;
+                    return true;
+                }
+
+                colorArray[index] = -1;
+                backtrackCount++;
+
+            } else {
+                colorRejections++;
+            }
+        }
+
+        callDepth--;
+        return false;
+    }
+
+    private void printBanner() {
+        System.out.println("\n-----------------------------------------------------------------");
+        System.out.println("  BACKTRACKING SOLVER - MAP COLORING");
+        System.out.println("  Step 1 : isSafe(v, color) - check all neighbors");
+        System.out.println("  Step 2 : solve(region) - try -> recurse -> undo");
+        System.out.println("  Step 3 : mapColoring(G, k) - init + solve(0)");
+        System.out.printf ("  Regions: %d free   |   Colors: %d   |   Worst case: O(k^n) = O(%d^%d)%n",
+            n, numColors, numColors, n);
+        System.out.println("-----------------------------------------------------------------");
+    }
+
+    private void printSolveStats() {
+        System.out.printf("%n--- BACKTRACKING SOLVE STATISTICS ---------------------------%n");
+        System.out.printf("  Free regions (n)          : %-6d%n", n);
+        System.out.printf("  Colors (k)                : %-6d%n", numColors);
+        System.out.printf("  Worst-case O(k^n)         : k=%d, n=%d%n", numColors, n);
+        System.out.printf("  Color trials              : %-10d%n", colorTrials);
+        System.out.printf("  isSafe rejections         : %-10d (%.1f%% pruned)%n",
+            colorRejections,
+            colorTrials == 0 ? 0.0 : 100.0 * colorRejections / colorTrials);
+        System.out.printf("  Backtrack steps           : %-10d%n", backtrackCount);
+        System.out.printf("  Max recursion depth       : %-10d%n", maxDepthReached);
+        System.out.printf("  Wall-clock solve time     : %-6d ms%n", solveTimeMs);
+        System.out.printf("  Solution found            : %-6s%n",
+            solution != null || colorTrials > 0 ? "YES" : "checking...");
+        System.out.printf("-------------------------------------------------------------%n");
+    }
+
+    public int  getColorTrials()      { return colorTrials; }
+    public int  getColorRejections()  { return colorRejections; }
+    public int  getBacktrackCount()   { return backtrackCount; }
+    public int  getMaxDepth()         { return maxDepthReached; }
+    public long getSolveTimeMs()      { return solveTimeMs; }
+    public int  getFreeCount()        { return n; }
+    public int  getNumColors()        { return numColors; }
+    public List<int[]> getMoveSequence() { return moveSequence; }
+}
