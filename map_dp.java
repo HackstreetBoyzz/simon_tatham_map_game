@@ -330,3 +330,118 @@ class BitmaskDPSolver {
         return solution;
     }
 
+
+    private int[] getPartialColors(int mask) {
+        if (maskColorCache.containsKey(mask)) return maskColorCache.get(mask);
+        int[] colors = new int[n];
+        Arrays.fill(colors, -1);
+        int cur = mask;
+        while (cur != 0 && parent[cur] != -1) {
+            colors[chosenRegion[cur]] = chosenColor[cur];
+            cur = parent[cur];
+        }
+        maskColorCache.put(mask, colors);
+        return colors;
+    }
+
+    private boolean isColorValid(int bit, int color, int mask) {
+        int regionId = freeIds.get(bit);
+        int[] partial = getPartialColors(mask);
+        for (int nbId : graph.getNeighbors(regionId)) {
+            Region nb = graph.getRegions().get(nbId);
+            int nbColor;
+            if (nb.isLocked || nb.color != -1) {
+                nbColor = nb.color;
+            } else {
+                int nbBit = freeIds.indexOf(nbId);
+                if (nbBit == -1 || (mask & (1 << nbBit)) == 0) continue;
+                nbColor = partial[nbBit];
+            }
+            if (nbColor == color) return false;
+        }
+        return true;
+    }
+
+    private int countLegalColors(int bit, int mask) {
+        int count = 0;
+        for (int c = 0; c < numColors; c++) if (isColorValid(bit, c, mask)) count++;
+        return count;
+    }
+
+    private Map<Integer, Integer> buildFullAssignment() {
+        Map<Integer, Integer> map = new HashMap<>();
+        for (Region r : graph.getRegions()) map.put(r.id, r.color);
+        return map;
+    }
+
+    private void computePartitions() {
+        lastPartitionA = new HashSet<>(); lastPartitionB = new HashSet<>(); lastBoundaryRegions = new HashSet<>();
+        if (freeIds.isEmpty()) return;
+        int half = freeIds.size() / 2;
+        for (int i = 0; i < freeIds.size(); i++) {
+            if (i < half) lastPartitionA.add(freeIds.get(i));
+            else          lastPartitionB.add(freeIds.get(i));
+        }
+    }
+
+    private Map<Integer, Integer> fallbackBacktrack() {
+        Map<Integer, Integer> assignment = new HashMap<>();
+        for (Region r : graph.getRegions()) assignment.put(r.id, r.color);
+        List<Integer> free = new ArrayList<>(freeIds);
+        if (!backtrack(free, 0, assignment)) return null;
+        return assignment;
+    }
+
+    private boolean backtrack(List<Integer> ids, int index, Map<Integer, Integer> assignment) {
+        if (index == ids.size()) return isFullyValid(assignment);
+        int bestIdx = index, bestCount = Integer.MAX_VALUE;
+        for (int i = index; i < ids.size(); i++) {
+            int cnt = legalColorsFromMap(ids.get(i), assignment).size();
+            if (cnt < bestCount) { bestCount = cnt; bestIdx = i; }
+        }
+        Collections.swap(ids, index, bestIdx);
+        int rid = ids.get(index);
+        for (int color : legalColorsFromMap(rid, assignment)) {
+            assignment.put(rid, color);
+            if (backtrack(ids, index + 1, assignment)) return true;
+            assignment.put(rid, -1);
+        }
+        Collections.swap(ids, index, bestIdx);
+        return false;
+    }
+
+    private List<Integer> legalColorsFromMap(int rid, Map<Integer,Integer> assignment) {
+        Set<Integer> used = new HashSet<>();
+        for (int nb : graph.getNeighbors(rid)) { int c = assignment.getOrDefault(nb,-1); if (c!=-1) used.add(c); }
+        List<Integer> legal = new ArrayList<>();
+        for (int i = 0; i < numColors; i++) if (!used.contains(i)) legal.add(i);
+        return legal;
+    }
+
+    private boolean isFullyValid(Map<Integer, Integer> assignment) {
+        for (Region r : graph.getRegions()) {
+            int c = assignment.getOrDefault(r.id, -1);
+            if (c == -1) return false;
+            for (int nb : graph.getNeighbors(r.id)) if (assignment.getOrDefault(nb,-1) == c) return false;
+        }
+        return true;
+    }
+
+    public int findSimpleLocalColor(int rid) {
+        Set<Integer> used = new HashSet<>();
+        for (int nb : graph.getNeighbors(rid)) { int c = graph.getRegions().get(nb).color; if (c!=-1) used.add(c); }
+        for (int i = 0; i < numColors; i++) if (!used.contains(i)) return i;
+        return -1;
+    }
+
+    public int  getStatesExplored()   { return statesExplored; }
+    public int  getStatesSkipped()    { return statesSkipped; }
+    public int  getColorTrials()      { return colorTrials; }
+    public int  getColorRejections()  { return colorRejections; }
+    public long getSolveTimeMs()      { return solveTimeMs; }
+    public int  getReconstructSteps() { return reconstructSteps; }
+    public int  getFreeCount()        { return n; }
+    public int  getTotalStates()      { return n <= 26 ? (1 << n) : -1; }
+    public int  getDpTableSize()      { return statesExplored; }
+}
+
