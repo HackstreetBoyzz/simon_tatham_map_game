@@ -359,3 +359,90 @@ class BacktrackingSolver {
     public int  getNumColors()        { return numColors; }
     public List<int[]> getMoveSequence() { return moveSequence; }
 }
+
+
+// Auto Solver (coordinates the logic and the move sequence)
+class AutoSolver {
+    private final GameGraph         graph;
+    private final BacktrackingSolver solver;
+
+    private Map<Integer, Integer> fullSolution = null;
+    private List<int[]>           moveSequence;
+    private int                   moveIndex    = 0;
+    private final List<String>    moveLog      = new ArrayList<>();
+
+    public AutoSolver(GameGraph graph) {
+        this.graph  = graph;
+        this.solver = new BacktrackingSolver(graph);
+    }
+
+    public boolean initialize() {
+        fullSolution = solver.solve();
+
+        if (fullSolution == null) {
+            System.out.println("[AUTO] Backtracking returned null - no solution exists.");
+            return false;
+        }
+
+        moveSequence = solver.getMoveSequence();
+        System.out.printf("%n[AUTO] %d moves queued for playback%n", moveSequence.size());
+        System.out.println("-----------------------------------------------------------------");
+        return true;
+    }
+
+    public int[] applyNextMove() {
+        if (moveIndex >= moveSequence.size()) return null;
+
+        int[] move  = moveSequence.get(moveIndex++);
+        int rid     = move[0];
+        int color   = move[1];
+        graph.getRegions().get(rid).color = color;
+
+        int neighborCount  = graph.getNeighbors(rid).size();
+        int legalRemaining = graph.availableColors(rid).size();
+        String log = String.format(
+            "Move %3d/%3d | Region %2d -> Color %d | Adj regions: %d | Free colors after: %d | Conflict: %s",
+            moveIndex, moveSequence.size(), rid, color + 1,
+            neighborCount, legalRemaining,
+            graph.inConflict(rid) ? "YES" : "none"
+        );
+        moveLog.add(log);
+        System.out.println("[MOVE] " + log);
+        return move;
+    }
+
+    public boolean isDone()          { return moveIndex >= moveSequence.size(); }
+    public int     getMoveIndex()    { return moveIndex; }
+    public int     getTotalMoves()   { return moveSequence.size(); }
+    public List<String> getMoveLog() { return moveLog; }
+
+    public boolean isPuzzleSolved() {
+        for (Region r : graph.getRegions())
+            if (r.color == -1 || graph.inConflict(r.id)) return false;
+        return true;
+    }
+
+    public BacktrackingSolver getSolver() { return solver; }
+
+    public void printFinalStats() {
+        long conflicts = graph.getRegions().stream().filter(r -> graph.inConflict(r.id)).count();
+        System.out.println("\n-----------------------------------------------------------------");
+        System.out.println("  FINAL BACKTRACKING STATISTICS");
+        System.out.println("-----------------------------------------------------------------");
+        System.out.printf("  %-30s : %d%n", "Total regions",           graph.getRegions().size());
+        System.out.printf("  %-30s : %d%n", "Locked (pre-colored)",    graph.getRegions().stream().filter(r->r.isLocked).count());
+        System.out.printf("  %-30s : %d%n", "Free regions solved",     solver.getFreeCount());
+        System.out.printf("  %-30s : %d%n", "Colors available (k)",    graph.getNumColors());
+        System.out.printf("  %-30s : %d%n", "Total color trials",      solver.getColorTrials());
+        System.out.printf("  %-30s : %d%n", "isSafe rejections",       solver.getColorRejections());
+        System.out.printf("  %-30s : %.1f%%%n","Pruning efficiency",
+            solver.getColorTrials()==0?0.0:100.0*solver.getColorRejections()/solver.getColorTrials());
+        System.out.printf("  %-30s : %d%n", "Backtrack steps",         solver.getBacktrackCount());
+        System.out.printf("  %-30s : %d%n", "Max recursion depth",     solver.getMaxDepth());
+        System.out.printf("  %-30s : %d ms%n","Solve time",            solver.getSolveTimeMs());
+        System.out.printf("  %-30s : %d%n", "Moves applied",           moveSequence.size());
+        System.out.printf("  %-30s : %d%n", "Conflicts remaining",     conflicts);
+        System.out.printf("  %-30s : %s%n", "Puzzle valid",            isPuzzleSolved() ? "YES" : "NO");
+        System.out.println("-----------------------------------------------------------------");
+    }
+}
