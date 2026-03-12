@@ -575,3 +575,422 @@ class AutoSolver {
         System.out.println("-----------------------------------------------------------------");
     }
 }
+
+// GUI - auto-only, step delay, live log panel
+class CooperativeGameGUI extends JFrame {
+    private final GameGraph  graph;
+    private final AutoSolver autoSolver;
+    private final Cell[][]   grid;
+    private final int        gridRows, gridCols, cellSize = 20;
+
+    private int          lastColoredRegion = -1;
+    private Set<Integer> hlA = new HashSet<>(), hlB = new HashSet<>();
+    private boolean      showOverlay = false;
+
+    private JPanel    mapPanel;
+    private JLabel    statusLabel, phaseLabel, moveLabel, statsLabel;
+    private JButton   startBtn, pauseBtn, restartBtn;
+    private JTextArea logArea;
+    private Timer     stepTimer;
+    private boolean   paused = false;
+    private JSpinner  regionSpinner;
+
+    private static final int STEP_DELAY_MS = 600;
+
+    private final Color[] COLORS = {
+        new Color(220, 30,  75),
+        new Color(50,  175, 70),
+        new Color(0,   120, 195),
+        new Color(245, 130, 45),
+    };
+    private static final Color TINT_A    = new Color(255, 220, 60,  80);
+    private static final Color TINT_B    = new Color(150, 80,  255, 80);
+
+    public CooperativeGameGUI(int numRegions, int numColors, int gridRows, int gridCols) {
+        mapgeneration gen = new mapgeneration(gridRows, gridCols);
+        List<Region> regions = gen.generateRegions(numRegions);
+        this.grid     = gen.getGrid();
+        this.gridRows = gridRows;
+        this.gridCols = gridCols;
+        this.graph    = new GameGraph(regions, grid, gridRows, gridCols, numColors);
+        lockInitialRegions();
+        this.autoSolver = new AutoSolver(graph);
+        buildGUI();
+    }
+
+    private void lockInitialRegions() {
+        Random rnd = new Random();
+        List<Region> regions = graph.getRegions();
+        int nc = graph.getNumColors();
+        int numToLock = Math.max(nc, regions.size() / 5);
+        List<Integer> avail = new ArrayList<>();
+        for (int i = 0; i < regions.size(); i++) avail.add(i);
+        Collections.shuffle(avail);
+        for (int color = 0; color < nc && !avail.isEmpty(); color++) {
+            int rid = avail.remove(0); Region r = regions.get(rid);
+            if (graph.availableColors(rid).contains(color)) { r.color = color; r.isLocked = true; }
+        }
+        while (!avail.isEmpty() && countLocked() < numToLock) {
+            int rid = avail.remove(0); Region r = regions.get(rid);
+            Set<Integer> ok = graph.availableColors(rid);
+            if (!ok.isEmpty()) { int c = ok.toArray(new Integer[0])[rnd.nextInt(ok.size())]; r.color = c; r.isLocked = true; }
+        }
+        System.out.println("\nLocked regions:");
+        for (Region r : regions) if (r.isLocked) System.out.println("   Region " + r.id + " -> Color " + r.color);
+    }
+
+    private int countLocked() { int n=0; for (Region r:graph.getRegions()) if(r.isLocked) n++; return n; }
+
+    private void buildGUI() {
+        setTitle("Bitmask DP Auto-Solver - Map Coloring");
+        setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
+        setLayout(new BorderLayout(6, 6));
+
+        // Top status bar
+        JPanel top = new JPanel(new GridLayout(4, 1, 1, 1));
+        top.setBackground(new Color(240, 240, 240));
+        top.setBorder(BorderFactory.createEmptyBorder(6, 10, 6, 10));
+
+        statusLabel = makeLabel("Press Start to run Bitmask DP Auto-Solver", 14, Font.BOLD, Color.BLACK);
+        phaseLabel  = makeLabel("dp[0]=true -> dp[mask|(1<<v)] -> dp[(1<<n)-1]", 12, Font.BOLD, new Color(0, 100, 200));
+        moveLabel   = makeLabel("Move: 0 / -   |   Free regions: -   |   States: -", 11, Font.PLAIN, Color.BLACK);
+        statsLabel  = makeLabel(statsText(), 11, Font.ITALIC, Color.DARK_GRAY);
+
+        top.add(statusLabel); top.add(phaseLabel); top.add(moveLabel); top.add(statsLabel);
+        add(top, BorderLayout.NORTH);
+
+        // Map
+        mapPanel = new JPanel() {
+            @Override protected void paintComponent(Graphics g) { super.paintComponent(g); drawMap(g); }
+        };
+        mapPanel.setPreferredSize(new Dimension(gridCols*cellSize+100, gridRows*cellSize+100));
+        mapPanel.setBackground(Color.WHITE);
+        add(new JScrollPane(mapPanel), BorderLayout.CENTER);
+
+        // Right log panel
+        logArea = new JTextArea(22, 44);
+        logArea.setEditable(false);
+        logArea.setFont(new Font("Monospaced", Font.PLAIN, 10));
+        logArea.setBackground(Color.WHITE);
+        logArea.setForeground(Color.BLACK);
+        logArea.setBorder(BorderFactory.createEmptyBorder(4, 6, 4, 6));
+        logArea.setText("Bitmask DP Technical Log\n------------------------------------------\n");
+        JScrollPane logScroll = new JScrollPane(logArea);
+        logScroll.setBorder(BorderFactory.createTitledBorder(
+            BorderFactory.createLineBorder(Color.GRAY),
+            "DP Diagnostics & Move Log", 0, 0,
+            new Font("Arial", Font.BOLD, 11), Color.BLACK));
+        logScroll.setPreferredSize(new Dimension(430, 0));
+        add(logScroll, BorderLayout.EAST);
+
+        // Controls
+        JPanel controls = new JPanel(new FlowLayout(FlowLayout.CENTER, 14, 8));
+        controls.setBackground(new Color(250, 250, 250));
+
+        startBtn   = makeBtn("Start",   new Color(60, 140, 60));
+        pauseBtn   = makeBtn("Pause",   new Color(180, 120, 20));
+        restartBtn = makeBtn("Restart", new Color(160, 50, 50));
+        pauseBtn.setEnabled(false);
+
+        startBtn.addActionListener(e   -> onStart());
+        pauseBtn.addActionListener(e   -> onPause());
+        restartBtn.addActionListener(e -> onRestart());
+
+        // Region count spinner
+        JPanel spinnerPanel = new JPanel(new FlowLayout(FlowLayout.CENTER, 6, 0));
+        spinnerPanel.setBackground(new Color(250, 250, 250));
+        JLabel spinnerLabel = new JLabel("Regions:");
+        spinnerLabel.setFont(new Font("Arial", Font.BOLD, 12));
+        regionSpinner = new JSpinner(new SpinnerNumberModel(25, 5, 60, 1));
+        regionSpinner.setPreferredSize(new Dimension(60, 28));
+        regionSpinner.setFont(new Font("Arial", Font.PLAIN, 12));
+        ((JSpinner.DefaultEditor) regionSpinner.getEditor()).getTextField().setHorizontalAlignment(JTextField.CENTER);
+        JLabel spinnerHint = new JLabel("(apply with Restart)");
+        spinnerHint.setFont(new Font("Arial", Font.ITALIC, 11));
+        spinnerHint.setForeground(Color.GRAY);
+        spinnerPanel.add(spinnerLabel);
+        spinnerPanel.add(regionSpinner);
+        spinnerPanel.add(spinnerHint);
+
+        // Legend
+        JPanel legend = new JPanel(new FlowLayout(FlowLayout.CENTER, 10, 2));
+        legend.setBackground(new Color(248, 248, 248));
+        addSwatch(legend, TINT_A, "Partition A (first half)");
+        addSwatch(legend, TINT_B, "Partition B (second half)");
+        addSwatch(legend, new Color(255,255,120,160), "Last colored");
+
+        controls.add(startBtn); controls.add(pauseBtn); controls.add(restartBtn);
+        JPanel south = new JPanel(new GridLayout(3, 1));
+        south.setBackground(new Color(250, 250, 250));
+        south.add(controls); south.add(spinnerPanel); south.add(legend);
+        add(south, BorderLayout.SOUTH);
+
+        // Step timer
+        stepTimer = new Timer(STEP_DELAY_MS, e -> stepBot());
+        stepTimer.setRepeats(true);
+
+        pack(); setLocationRelativeTo(null);
+    }
+
+    private JButton makeBtn(String text, Color bg) {
+        JButton b = new JButton(text);
+        b.setBackground(bg); b.setForeground(Color.WHITE); b.setOpaque(true);
+        b.setBorderPainted(false); b.setFont(new Font("Arial", Font.BOLD, 13));
+        b.setPreferredSize(new Dimension(120, 36));
+        return b;
+    }
+
+    private JLabel makeLabel(String text, int size, int style, Color fg) {
+        JLabel l = new JLabel(text, SwingConstants.CENTER);
+        l.setFont(new Font("Arial", style, size)); l.setForeground(fg); return l;
+    }
+
+    private void addSwatch(JPanel p, Color c, String label) {
+        JLabel sw = new JLabel("  " + label + "  ");
+        sw.setOpaque(true); sw.setBackground(c);
+        sw.setBorder(BorderFactory.createLineBorder(Color.GRAY));
+        sw.setFont(new Font("Arial", Font.BOLD, 10)); sw.setForeground(Color.BLACK);
+        p.add(sw);
+    }
+
+    private void onStart() {
+        startBtn.setEnabled(false);
+        pauseBtn.setEnabled(true);
+        statusLabel.setText("Running Bitmask DP - please wait...");
+        phaseLabel.setText("[DP] Iterating masks 0 -> 2^n-1, MRV ordering, building parent[]...");
+
+        new Thread(() -> {
+            boolean ok = autoSolver.initialize();
+            SwingUtilities.invokeLater(() -> {
+                if (!ok) {
+                    statusLabel.setText("DP found NO solution - locked regions may conflict.");
+                    appendLog("ERROR: DP unsolvable.\n");
+                    startBtn.setEnabled(true); pauseBtn.setEnabled(false); return;
+                }
+                appendSolveStats();
+                BitmaskDPSolver s = autoSolver.getSolver();
+                phaseLabel.setText(String.format(
+                    "[DP] Solution found! %d moves queued | explored %d / %d states | %d ms",
+                    autoSolver.getTotalMoves(), s.getStatesExplored(),
+                    s.getTotalStates(), s.getSolveTimeMs()));
+                moveLabel.setText(String.format(
+                    "Move: 0 / %d   |   Free regions: %d   |   2^n states: %s",
+                    autoSolver.getTotalMoves(), s.getFreeCount(),
+                    s.getTotalStates() < 0 ? "fallback" : String.valueOf(s.getTotalStates())));
+
+                hlA = s.lastPartitionA; hlB = s.lastPartitionB;
+                showOverlay = true;
+                mapPanel.repaint();
+                stepTimer.start();
+            });
+        }).start();
+    }
+
+    private void onPause() {
+        if (!paused) {
+            stepTimer.stop(); paused = true;
+            pauseBtn.setText("Resume");
+            statusLabel.setText("Paused - click Resume to continue");
+        } else {
+            stepTimer.start(); paused = false;
+            pauseBtn.setText("Pause");
+            statusLabel.setText("Resuming...");
+        }
+    }
+
+    private void onRestart() {
+        int newRegions = (Integer) regionSpinner.getValue();
+        stepTimer.stop(); dispose();
+        SwingUtilities.invokeLater(() -> new CooperativeGameGUI(newRegions, 4, 20, 25).setVisible(true));
+    }
+
+    private void stepBot() {
+        if (autoSolver.isDone()) { stepTimer.stop(); lastColoredRegion=-1; showOverlay=false; onFinished(); return; }
+
+        int[] move = autoSolver.applyNextMove();
+        if (move == null) { stepTimer.stop(); onFinished(); return; }
+
+        int rid   = move[0];
+        int color = move[1];
+        lastColoredRegion = rid;
+
+        int idx   = autoSolver.getMoveIndex();
+        int total = autoSolver.getTotalMoves();
+        BitmaskDPSolver s = autoSolver.getSolver();
+
+        moveLabel.setText(String.format(
+            "Move: %d / %d   |   Free: %d   |   States: %d   |   Trials: %d   |   Rejects: %d",
+            idx, total, s.getFreeCount(), s.getStatesExplored(), s.getColorTrials(), s.getColorRejections()));
+        statusLabel.setText(String.format(
+            "Region %d -> Color %d   |   %d regions remaining", rid, color+1, total-idx));
+        phaseLabel.setText(String.format(
+            "[DP] Reconstructed from parent[] chain | Solve time: %d ms | MRV pruned: %.1f%%",
+            s.getSolveTimeMs(),
+            s.getColorTrials()==0?0.0:100.0*s.getColorRejections()/s.getColorTrials()));
+        statsLabel.setText(statsText());
+
+        List<String> log = autoSolver.getMoveLog();
+        if (!log.isEmpty()) appendLog(log.get(log.size()-1) + "\n");
+
+        mapPanel.repaint();
+    }
+
+    private void onFinished() {
+        autoSolver.printFinalStats();
+        appendFinalStats();
+
+        boolean solved = autoSolver.isPuzzleSolved();
+        statusLabel.setText(solved ? "Puzzle Solved! All regions colored - no conflicts." : "Finished with conflicts.");
+        phaseLabel.setText("dp[(1<<n)-1] = true  |  parent[] reconstructed  |  all moves applied");
+        statsLabel.setText(statsText());
+        startBtn.setEnabled(false); pauseBtn.setEnabled(false);
+        mapPanel.repaint();
+
+        if (solved) {
+            BitmaskDPSolver s = autoSolver.getSolver();
+            JOptionPane.showMessageDialog(this,
+                "Bitmask DP Solved the Map!\n\n"
+                + "All regions legally colored - zero conflicts\n\n"
+                + String.format("  Free regions (n)     : %d%n", s.getFreeCount())
+                + String.format("  State space (2^n)    : %s%n", s.getTotalStates()<0?"fallback":String.valueOf(s.getTotalStates()))
+                + String.format("  States explored      : %d%n", s.getStatesExplored())
+                + String.format("  Color trials         : %d%n", s.getColorTrials())
+                + String.format("  Rejections (MRV)     : %d  (%.1f%% pruned)%n",
+                    s.getColorRejections(),
+                    s.getColorTrials()==0?0.0:100.0*s.getColorRejections()/s.getColorTrials())
+                + String.format("  Reconstruction steps : %d%n", s.getReconstructSteps())
+                + String.format("  Solve time           : %d ms%n", s.getSolveTimeMs()),
+                "Victory!", JOptionPane.INFORMATION_MESSAGE);
+        }
+    }
+
+    private void appendLog(String text) {
+        logArea.append(text);
+        logArea.setCaretPosition(logArea.getDocument().getLength());
+    }
+
+    private void appendSolveStats() {
+        BitmaskDPSolver s = autoSolver.getSolver();
+        appendLog(String.format(
+            "\n--- DP SOLVE STATS --------------------------\n" +
+            "  Free regions (n)       : %d\n" +
+            "  State space (2^n)      : %s\n" +
+            "  States explored        : %d\n" +
+            "  States deduped/skipped : %d\n" +
+            "  Color trials           : %d\n" +
+            "  Color rejections       : %d  (%.1f%% pruned)\n" +
+            "  Reconstruction steps   : %d\n" +
+            "  Solve time             : %d ms\n" +
+            "---------------------------------------------\n",
+            s.getFreeCount(),
+            s.getTotalStates()<0?"fallback":String.valueOf(s.getTotalStates()),
+            s.getStatesExplored(), s.getStatesSkipped(),
+            s.getColorTrials(), s.getColorRejections(),
+            s.getColorTrials()==0?0.0:100.0*s.getColorRejections()/s.getColorTrials(),
+            s.getReconstructSteps(), s.getSolveTimeMs()
+        ));
+    }
+
+    private void appendFinalStats() {
+        BitmaskDPSolver s = autoSolver.getSolver();
+        long conflicts = graph.getRegions().stream().filter(r -> graph.inConflict(r.id)).count();
+        appendLog(String.format(
+            "\n--- FINAL STATS ------------------------------\n" +
+            "  Total moves applied    : %d\n" +
+            "  Conflicts remaining    : %d\n" +
+            "  MRV pruning efficiency : %.1f%%\n" +
+            "  Puzzle solved          : %s\n" +
+            "----------------------------------------------\n",
+            autoSolver.getTotalMoves(), conflicts,
+            s.getColorTrials()==0?0.0:100.0*s.getColorRejections()/s.getColorTrials(),
+            autoSolver.isPuzzleSolved() ? "YES" : "NO"
+        ));
+    }
+
+    private String statsText() {
+        int total=graph.getRegions().size(), locked=countLocked(), colored=0, conflicts=0;
+        for (Region r : graph.getRegions()) { if(r.color!=-1){colored++; if(graph.inConflict(r.id)) conflicts++;} }
+        BitmaskDPSolver s = autoSolver.getSolver();
+        return String.format(
+            "Colored: %d/%d | Locked: %d | Conflicts: %d | Explored: %d | Trials: %d | Pruned: %.0f%% | Time: %dms",
+            colored, total, locked, conflicts,
+            s.getStatesExplored(), s.getColorTrials(),
+            s.getColorTrials()==0?0.0:100.0*s.getColorRejections()/s.getColorTrials(),
+            s.getSolveTimeMs());
+    }
+
+    private void drawMap(Graphics g) {
+        Graphics2D g2 = (Graphics2D) g;
+        g2.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
+        int ox = 50, oy = 50;
+
+        for (Region r : graph.getRegions()) {
+            Color fill = r.color == -1 ? new Color(218, 218, 218) : COLORS[r.color];
+            if (r.id == lastColoredRegion) fill = fill.brighter();
+            for (Cell c : r.cells) {
+                g2.setColor(fill);
+                g2.fillRect(ox + c.col*cellSize, oy + c.row*cellSize, cellSize, cellSize);
+            }
+        }
+
+        if (showOverlay) {
+            for (Region r : graph.getRegions()) {
+                Color tint = hlA.contains(r.id) ? TINT_A : hlB.contains(r.id) ? TINT_B : null;
+                if (tint != null) {
+                    g2.setColor(tint);
+                    for (Cell c : r.cells) g2.fillRect(ox+c.col*cellSize, oy+c.row*cellSize, cellSize, cellSize);
+                }
+            }
+        }
+
+        // Highlight last colored region border
+        if (lastColoredRegion >= 0) {
+            g2.setColor(new Color(255, 255, 100, 200)); g2.setStroke(new BasicStroke(3));
+            for (Cell c : graph.getRegions().get(lastColoredRegion).cells)
+                g2.drawRect(ox+c.col*cellSize+1, oy+c.row*cellSize+1, cellSize-2, cellSize-2);
+        }
+
+        // Region borders
+        g2.setColor(Color.BLACK); g2.setStroke(new BasicStroke(2));
+        for (int row = 0; row < gridRows; row++)
+            for (int col = 0; col < gridCols; col++) {
+                Cell cell = grid[row][col];
+                int x = ox+col*cellSize, y = oy+row*cellSize;
+                if (col<gridCols-1 && grid[row][col+1].regionId!=cell.regionId) g2.drawLine(x+cellSize,y,x+cellSize,y+cellSize);
+                if (row<gridRows-1 && grid[row+1][col].regionId!=cell.regionId) g2.drawLine(x,y+cellSize,x+cellSize,y+cellSize);
+            }
+
+        // Labels
+        g2.setFont(new Font("Arial", Font.BOLD, 10));
+        for (Region r : graph.getRegions()) {
+            Point cen = r.getCentroid();
+            int x = ox+cen.x*cellSize+cellSize/2, y = oy+cen.y*cellSize+cellSize/2;
+            if (r.isLocked) {
+                g2.setFont(new Font("Arial", Font.BOLD, 13)); g2.setColor(Color.WHITE);
+                g2.drawString("L", x-5, y+5); g2.setFont(new Font("Arial", Font.BOLD, 10));
+            } else if (r.color == -1) {
+                g2.setColor(Color.DARK_GRAY); g2.drawString(String.valueOf(r.id), x-5, y+5);
+            } else if (graph.inConflict(r.id)) {
+                g2.setColor(Color.RED); g2.setFont(new Font("Arial", Font.BOLD, 15));
+                g2.drawString("X", x-5, y+5); g2.setFont(new Font("Arial", Font.BOLD, 10));
+            } else if (r.id == lastColoredRegion) {
+                g2.setColor(new Color(140, 0, 210)); g2.setFont(new Font("Arial", Font.BOLD, 13));
+                g2.drawString("*", x-3, y+5); g2.setFont(new Font("Arial", Font.BOLD, 10));
+            }
+        }
+    }
+}
+
+public class map_dp {
+    public static void main(String[] args) {
+        SwingUtilities.invokeLater(() -> {
+            System.out.println("-------------------------------------------------------------");
+            System.out.println("  MAP COLORING - BITMASK DP AUTO-SOLVER");
+            System.out.println("  State : dp[mask]  |  Base  : dp[0] = true");
+            System.out.println("  Trans : dp[mask|(1<<v)]  |  Goal : dp[(1<<n)-1]");
+            System.out.println("  MRV heuristic  +  parent[] reconstruction");
+            System.out.println("-------------------------------------------------------------");
+            new CooperativeGameGUI(25, 4, 20, 25).setVisible(true);
+        });
+    }
+}
