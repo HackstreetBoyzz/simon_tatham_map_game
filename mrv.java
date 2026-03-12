@@ -1,4 +1,4 @@
-package third_auto_mrv;
+package eval34;
 
 import java.awt.*;
 import java.util.*;
@@ -6,9 +6,7 @@ import java.util.List;
 import javax.swing.*;
 import javax.swing.Timer;
 
-// ============================================================================
-// CELL
-// ============================================================================
+// Cell class
 class Cell {
     int row, col;
     int regionId = -1;
@@ -19,9 +17,7 @@ class Cell {
     }
 }
 
-// ============================================================================
-// REGION
-// ============================================================================
+// Region class
 class Region {
     int id;
     Set<Cell> cells;
@@ -47,9 +43,7 @@ class Region {
     }
 }
 
-// ============================================================================
-// MAP GENERATION (Using original robust generation)
-// ============================================================================
+// Map generation
 class mapgeneration {
     private final Random random = new Random();
     private final int gridRows, gridCols;
@@ -162,9 +156,7 @@ class mapgeneration {
     public int getGridCols()   { return gridCols; }
 }
 
-// ============================================================================
-// GAME GRAPH
-// ============================================================================
+// Game Graph
 class GameGraph {
     private final List<Region> regions;
     private final Map<Integer, Set<Integer>> adjacencyList;
@@ -248,9 +240,7 @@ class GameGraph {
     public int getNumColors() { return numColors; }
 }
 
-// ============================================================================
-// BOT MOVE RECORD
-// ============================================================================
+// Bot move tracking
 class BotMove {
     int regionId;
     int color;
@@ -263,10 +253,7 @@ class BotMove {
     }
 }
 
-// ============================================================================
-// HEURISTIC BOT SOLVER
-// CSP solver using MRV + Degree Heuristic + Fallback Recoloring
-// ============================================================================
+// Heuristic Bot Solver (MRV + Degree)
 class Bot {
     private final GameGraph graph;
 
@@ -294,7 +281,7 @@ class Bot {
                 if (regions.get(neighbor).color == -1) uncoloredNeighbors++;
             }
 
-            // MRV check; Tie-breaker is Degree Heuristic (max uncolored neighbors)
+            // MRV check; Tie-breaker is Degree Heuristic
             if (remainingValues < minRemainingValues || 
                (remainingValues == minRemainingValues && uncoloredNeighbors > maxUncoloredNeighbors)) {
                 bestRegion = region.id;
@@ -305,13 +292,12 @@ class Bot {
 
         if (bestRegion != -1) {
             Set<Integer> available = graph.getAvailableColors(bestRegion);
-            int chosenColor = available.iterator().next(); // First valid color
+            int chosenColor = available.iterator().next();
             graph.colorRegion(bestRegion, chosenColor);
             return new BotMove(bestRegion, chosenColor, false);
         }
 
-        // 2. If no uncolored regions can be colored, TRY RECOLORING
-        // First, check if a stuck uncolored region can be freed by recoloring a neighbor
+        // 2. TRY RECOLORING
         for (Region uncoloredRegion : regions) {
             if (uncoloredRegion.color != -1 || uncoloredRegion.isLocked) continue;
 
@@ -321,24 +307,24 @@ class Bot {
                     Region neighbor = regions.get(neighborId);
                     if (!neighbor.isLocked && neighbor.color != -1) {
                         int oldColor = neighbor.color;
-                        neighbor.color = -1; // Temporarily remove color to check alternatives
+                        neighbor.color = -1; 
                         
                         Set<Integer> neighborColors = graph.getAvailableColors(neighborId);
-                        neighborColors.remove(oldColor); // Must change to a different color
+                        neighborColors.remove(oldColor); 
 
                         if (!neighborColors.isEmpty()) {
                             int newColor = neighborColors.iterator().next();
                             neighbor.color = newColor;
                             return new BotMove(neighborId, newColor, true);
                         } else {
-                            neighbor.color = oldColor; // Restore if no alternatives
+                            neighbor.color = oldColor; 
                         }
                     }
                 }
             }
         }
 
-        // 3. General recoloring (if specific neighbor logic fails)
+        // 3. General recoloring
         for (Region region : regions) {
             if (region.isLocked || region.color == -1) continue;
 
@@ -356,7 +342,6 @@ class Bot {
             }
         }
 
-        return null; // Bot is completely stuck
+        return null;
     }
 }
-
