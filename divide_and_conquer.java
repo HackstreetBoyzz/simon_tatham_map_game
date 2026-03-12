@@ -462,3 +462,631 @@ class DivideAndConquerBot {
     }
 }
 
+
+class botplay {
+    private final GameGraph graph;
+    private final DivideAndConquerBot solver;
+
+    private Map<Integer, Integer> fullSolution  = null;
+    private final List<int[]>moveSequence  = new ArrayList<>();
+    private int moveIndex= 0;
+    private final List<String> moveLog = new ArrayList<>();
+
+    // Per-step partition snapshots (one entry per move, built during solve)
+    private final List<Set<Integer>> stepPartitionA  = new ArrayList<>();
+    private final List<Set<Integer>> stepPartitionB  = new ArrayList<>();
+    private final List<Set<Integer>> stepBoundary    = new ArrayList<>();
+
+    public botplay(GameGraph graph) {
+        this.graph  = graph;
+        this.solver = new DivideAndConquerBot(graph);
+    }
+
+    public boolean initialize() {
+        printBanner();
+        long t0 = System.currentTimeMillis();
+        fullSolution = solver.solve();
+        long elapsed = System.currentTimeMillis() - t0;
+        printSolveStats(elapsed);
+
+        if (fullSolution == null) {
+            System.out.println("[AUTO] D&C returned null - unsolvable.");
+            return false;
+        }
+
+        for (Region r : graph.getRegions()) {
+            if (!r.isLocked) {
+                Integer c = fullSolution.get(r.id);
+                if (c != null && c != -1) moveSequence.add(new int[]{ r.id, c });
+            }
+        }
+
+        buildStepPartitions();
+
+        System.out.printf("%n AUTO %d moves queued for playback%n", moveSequence.size());
+        System.out.println("-----------------------------------------------------------------");
+        return true;
+    }
+
+    private void buildStepPartitions() {
+        Set<Integer> remaining = new LinkedHashSet<>();
+        for (int[] m : moveSequence) remaining.add(m[0]);
+
+        for (int i = 0; i < moveSequence.size(); i++) {
+            int colored = moveSequence.get(i)[0];
+            remaining.remove(colored);
+
+            if (remaining.size() >= 2) {
+                List<Integer> rem = new ArrayList<>(remaining);
+                List<Integer>[] parts = bisect(rem);
+                stepPartitionA.add(new HashSet<>(parts[0]));
+                stepPartitionB.add(new HashSet<>(parts[1]));
+                Set<Integer> bSet = new HashSet<>(parts[1]);
+                Set<Integer> boundary = new HashSet<>();
+                for (int rid : parts[0])
+                    for (int nb : graph.getNeighbors(rid))
+                        if (bSet.contains(nb)) { boundary.add(rid); boundary.add(nb); break; }
+                stepBoundary.add(boundary);
+            } else {
+                stepPartitionA.add(new HashSet<>(remaining));
+                stepPartitionB.add(new HashSet<>());
+                stepBoundary.add(new HashSet<>());
+            }
+        }
+    }
+
+    /** BFS bisection — same logic as DivideAndConquerBot.graphBisect, self-contained here. */
+    @SuppressWarnings("unchecked")
+    private List<Integer>[] bisect(List<Integer> free) {
+        if (free.size() < 2) return new List[]{ free, new ArrayList<>() };
+        Set<Integer> freeSet = new HashSet<>(free);
+
+        java.util.function.Function<Integer, Map<Integer, Integer>> bfsDist = (src) -> {
+            Map<Integer, Integer> dist = new HashMap<>();
+            Queue<Integer> q = new LinkedList<>();
+            dist.put(src, 0); q.add(src);
+            while (!q.isEmpty()) {
+                int cur = q.poll();
+                for (int nb : graph.getNeighbors(cur)) {
+                    if (freeSet.contains(nb) && !dist.containsKey(nb)) {
+                        dist.put(nb, dist.get(cur) + 1); q.add(nb);
+                    }
+                }
+            }
+            return dist;
+        };
+
+        int seedA = free.get(0);
+        Map<Integer, Integer> d0 = bfsDist.apply(seedA);
+        int nodeA = seedA, maxD = -1;
+        for (Map.Entry<Integer, Integer> e : d0.entrySet())
+            if (e.getValue() > maxD) { maxD = e.getValue(); nodeA = e.getKey(); }
+
+        Map<Integer, Integer> distFromA = bfsDist.apply(nodeA);
+        int nodeB = free.get(free.size() / 2); maxD = -1;
+        for (Map.Entry<Integer, Integer> e : distFromA.entrySet())
+            if (!e.getKey().equals(nodeA) && e.getValue() > maxD) { maxD = e.getValue(); nodeB = e.getKey(); }
+
+        Map<Integer, Integer> distFromB = bfsDist.apply(nodeB);
+        List<Integer> pA = new ArrayList<>(), pB = new ArrayList<>();
+        for (int rid : free) {
+            int dA = distFromA.getOrDefault(rid, Integer.MAX_VALUE / 2);
+            int dB = distFromB.getOrDefault(rid, Integer.MAX_VALUE / 2);
+            if (dA <= dB) pA.add(rid); else pB.add(rid);
+        }
+        return new List[]{ pA, pB };
+    }
+
+    private void printBanner() {
+        System.out.println("\n-----------------------------------------------------------------");
+        System.out.println("  DIVIDE & CONQUER AUTO-SOLVER");
+        System.out.println("  Divide  : BFS bisection (pseudo-peripheral pair)");
+        System.out.println("  Conquer : Recurse each partition independently");
+        System.out.println("  Merge   : Detect & re-solve seam conflicts (MRV backtrack)");
+        System.out.println("  Base    : Backtracking when size <= " + DivideAndConquerBot.BASE_SIZE);
+        System.out.println("-----------------------------------------------------------------");
+    }
+
+    private void printSolveStats(long elapsed) {
+        DivideAndConquerBot s = solver;
+        System.out.printf("%n--- D&C SOLVE STATISTICS ---------------------------------------%n");
+        System.out.printf("   Free regions (n)          : %-6d%n", s.getFreeCount());
+        System.out.printf("   Divide + merge steps      : %-10d%n", s.getReconstructSteps());
+        System.out.printf("   Backtrack base calls      : %-10d%n", s.getStatesExplored());
+        System.out.printf("   Seam regions re-solved    : %-10d%n", s.getStatesSkipped());
+        System.out.printf("   Color (region,col) trials : %-10d%n", s.getColorTrials());
+        System.out.printf("   Color rejections          : %-10d (%.1f%% pruned)%n",
+            s.getColorRejections(),
+            s.getColorTrials()==0 ? 0.0 : 100.0*s.getColorRejections()/s.getColorTrials());
+        System.out.printf("   Wall-clock solve time     : %-6d ms%n", elapsed);
+        System.out.printf("   Solution found            : %-6s%n",
+            fullSolution != null ? "YES" : "NO");
+        System.out.printf("-----------------------------------------------------------------%n");
+    }
+
+    /** Apply next move. Returns int[]{rid, color} or null if done. */
+    public int[] nextmove() {
+        if (moveIndex >= moveSequence.size()) return null;
+        int[] move = moveSequence.get(moveIndex++);
+        int rid = move[0];
+        int color = move[1];
+        graph.getRegions().get(rid).color = color;
+
+        // Update live partition overlay for this step
+        int stepIdx = moveIndex - 1;
+        if (stepIdx < stepPartitionA.size()) {
+            solver.lastPartitionA      = stepPartitionA.get(stepIdx);
+            solver.lastPartitionB      = stepPartitionB.get(stepIdx);
+            solver.lastBoundaryRegions = stepBoundary.get(stepIdx);
+        }
+
+        int neighborCount  = graph.getNeighbors(rid).size();
+        int legalRemaining = graph.availableColors(rid).size();
+        String log = String.format(
+            "Move %3d/%3d | Region %2d -> Color %d | Adj regions: %d | Free colors after: %d | Conflict: %s",
+            moveIndex, moveSequence.size(), rid, color + 1,
+            neighborCount, legalRemaining,
+            graph.inConflict(rid) ? "YES" : "NO"
+        );
+        moveLog.add(log);
+        System.out.println("[MOVE] " + log);
+        return move;
+    }
+
+    public boolean isDone(){ 
+        return moveIndex >= moveSequence.size(); }
+    public int getMoveIndex() {
+        return moveIndex; 
+    }
+    public int getTotalMoves() {
+        return moveSequence.size(); 
+    }
+    public List<String> getMoveLog() {
+        return moveLog; 
+    }
+    public boolean isPuzzleSolved() {
+        for (Region r : graph.getRegions())
+            if (r.color == -1 || graph.inConflict(r.id)) return false;
+        return true;
+    }
+
+    public DivideAndConquerBot getSolver() { return solver; }
+
+    public void printFinalStats() {
+        long conflicts = graph.getRegions().stream().filter(r -> graph.inConflict(r.id)).count();
+        DivideAndConquerBot s = solver;
+        System.out.println("\n-----------------------------------------------------------------");
+        System.out.println("  FINAL COMPARISON STATISTICS");
+        System.out.println("-----------------------------------------------------------------");
+        System.out.printf("  %-30s : %d%n", "Total regions",             graph.getRegions().size());
+        System.out.printf("  %-30s : %d%n", "Locked (pre-colored)",      graph.getRegions().stream().filter(r->r.isLocked).count());
+        System.out.printf("  %-30s : %d%n", "Free regions solved by D&C",s.getFreeCount());
+        System.out.printf("  %-30s : %d%n", "Colors available (k)",      graph.getNumColors());
+        System.out.printf("  %-30s : %d%n", "Divide + merge steps",      s.getReconstructSteps());
+        System.out.printf("  %-30s : %d%n", "Backtrack base calls",      s.getStatesExplored());
+        System.out.printf("  %-30s : %d%n", "Seam regions re-solved",    s.getStatesSkipped());
+        System.out.printf("  %-30s : %d%n", "Total color trials",        s.getColorTrials());
+        System.out.printf("  %-30s : %d%n", "Color rejections (pruned)", s.getColorRejections());
+        System.out.printf("  %-30s : %.1f%%%n","MRV pruning efficiency",
+            s.getColorTrials()==0 ? 0.0 : 100.0*s.getColorRejections()/s.getColorTrials());
+        System.out.printf("  %-30s : %d ms%n","D&C solve time",          s.getSolveTimeMs());
+        System.out.printf("  %-30s : %d%n", "Moves applied",             moveSequence.size());
+        System.out.printf("  %-30s : %d%n", "Conflicts remaining",       conflicts);
+        System.out.printf("  %-30s : %s%n", "Puzzle valid",              isPuzzleSolved() ? "YES" : "NO");
+        System.out.println("-----------------------------------------------------------------");
+    }
+}
+
+
+class CooperativeGameGUI extends JFrame {
+    private final GameGraph  graph;
+    private final botplay botplay;
+    private final Cell[][]   grid;
+    private final int        gridRows, gridCols, cellSize = 20;
+
+    private int          lastColoredRegion = -1;
+    private Set<Integer> hlA = new HashSet<>(), hlB = new HashSet<>();
+    private boolean      showOverlay = false;
+
+    private JPanel    mapPanel;
+    private JLabel    statusLabel, phaseLabel, moveLabel, statsLabel;
+    private JButton   startBtn, pauseBtn, restartBtn;
+    private JTextArea logArea;
+    private Timer     stepTimer;
+    private boolean   paused = false;
+    private JSpinner  regionSpinner;
+
+    private static final int STEP_DELAY_MS = 600;
+
+    private final Color[] COLORS = {
+        new Color(220, 30,  75),
+        new Color(50,  175, 70),
+        new Color(0,   120, 195),
+        new Color(245, 130, 45),
+    };
+    private static final Color TINT_A    = new Color(255, 220, 60,  80);
+    private static final Color TINT_B    = new Color(150, 80,  255, 80);
+
+    public CooperativeGameGUI(int numRegions, int numColors, int gridRows, int gridCols) {
+        mapgeneration gen = new mapgeneration(gridRows, gridCols);
+        List<Region> regions = gen.generateRegions(numRegions);
+        this.grid     = gen.getGrid();
+        this.gridRows = gridRows;
+        this.gridCols = gridCols;
+        this.graph    = new GameGraph(regions, grid, gridRows, gridCols, numColors);
+        lockInitialRegions();
+        this.botplay = new botplay(graph);
+        buildGUI();
+    }
+
+    private void lockInitialRegions() {
+        Random rnd = new Random();
+        List<Region> regions = graph.getRegions();
+        int nc = graph.getNumColors();
+        int numToLock = Math.max(nc, regions.size() / 5);
+        List<Integer> avail = new ArrayList<>();
+        for (int i = 0; i < regions.size(); i++) avail.add(i);
+        Collections.shuffle(avail);
+        for (int color = 0; color < nc && !avail.isEmpty(); color++) {
+            int rid = avail.remove(0); Region r = regions.get(rid);
+            if (graph.availableColors(rid).contains(color)) { r.color = color; r.isLocked = true; }
+        }
+        while (!avail.isEmpty() && countLocked() < numToLock) {
+            int rid = avail.remove(0); Region r = regions.get(rid);
+            Set<Integer> ok = graph.availableColors(rid);
+            if (!ok.isEmpty()) { int c = ok.toArray(new Integer[0])[rnd.nextInt(ok.size())]; r.color = c; r.isLocked = true; }
+        }
+        System.out.println("\nLocked regions:");
+        for (Region r : regions) if (r.isLocked) System.out.println("   Region " + r.id + " -> Color " + r.color);
+    }
+
+    private int countLocked() { int n=0; for (Region r:graph.getRegions()) if(r.isLocked) n++; return n; }
+
+    private void buildGUI() {
+        setTitle("Divide & Conquer Auto-Solver - Map Coloring");
+        setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
+        setLayout(new BorderLayout(6, 6));
+
+        JPanel top = new JPanel(new GridLayout(4, 1, 1, 1));
+        top.setBackground(new Color(240, 240, 240));
+        top.setBorder(BorderFactory.createEmptyBorder(6, 10, 6, 10));
+
+        statusLabel = makeLabel("Press Start to run Divide & Conquer Auto-Solver", 14, Font.BOLD, Color.BLACK);
+        phaseLabel  = makeLabel("Divide -> Conquer Left -> Conquer Right -> Merge Seam", 12, Font.BOLD, new Color(0, 100, 200));
+        moveLabel   = makeLabel("Move: 0 / -   |   Free regions: -   |   D&C Steps: -", 11, Font.PLAIN, Color.BLACK);
+        statsLabel  = makeLabel(statsText(), 11, Font.ITALIC, Color.DARK_GRAY);
+
+        top.add(statusLabel); top.add(phaseLabel); top.add(moveLabel); top.add(statsLabel);
+        add(top, BorderLayout.NORTH);
+
+        mapPanel = new JPanel() {
+            @Override protected void paintComponent(Graphics g) { super.paintComponent(g); drawMap(g); }
+        };
+        mapPanel.setPreferredSize(new Dimension(gridCols*cellSize+100, gridRows*cellSize+100));
+        mapPanel.setBackground(Color.WHITE);
+        add(new JScrollPane(mapPanel), BorderLayout.CENTER);
+
+        logArea = new JTextArea(22, 44);
+        logArea.setEditable(false);
+        logArea.setFont(new Font("Monospaced", Font.PLAIN, 10));
+        logArea.setBackground(Color.WHITE);
+        logArea.setForeground(Color.BLACK);
+        logArea.setBorder(BorderFactory.createEmptyBorder(4, 6, 4, 6));
+        logArea.setText("Divide & Conquer Technical Log\n------------------------------------------\n");
+        JScrollPane logScroll = new JScrollPane(logArea);
+        logScroll.setBorder(BorderFactory.createTitledBorder(
+            BorderFactory.createLineBorder(Color.GRAY),
+            "D&C Diagnostics & Move Log", 0, 0,
+            new Font("Arial", Font.BOLD, 11), Color.BLACK));
+        logScroll.setPreferredSize(new Dimension(430, 0));
+        add(logScroll, BorderLayout.EAST);
+
+        JPanel controls = new JPanel(new FlowLayout(FlowLayout.CENTER, 14, 8));
+        controls.setBackground(new Color(250, 250, 250));
+
+        startBtn   = makeBtn("Start",   new Color(60, 140, 60));
+        pauseBtn   = makeBtn("Pause",   new Color(180, 120, 20));
+        restartBtn = makeBtn("Restart", new Color(160, 50, 50));
+        pauseBtn.setEnabled(false);
+
+        startBtn.addActionListener(e   -> onStart());
+        pauseBtn.addActionListener(e   -> onPause());
+        restartBtn.addActionListener(e -> onRestart());
+
+        JPanel spinnerPanel = new JPanel(new FlowLayout(FlowLayout.CENTER, 6, 0));
+        spinnerPanel.setBackground(new Color(250, 250, 250));
+        JLabel spinnerLabel = new JLabel("Regions:");
+        spinnerLabel.setFont(new Font("Arial", Font.BOLD, 12));
+        regionSpinner = new JSpinner(new SpinnerNumberModel(25, 5, 60, 1));
+        regionSpinner.setPreferredSize(new Dimension(60, 28));
+        regionSpinner.setFont(new Font("Arial", Font.PLAIN, 12));
+        ((JSpinner.DefaultEditor) regionSpinner.getEditor()).getTextField().setHorizontalAlignment(JTextField.CENTER);
+        JLabel spinnerHint = new JLabel("(apply with Restart)");
+        spinnerHint.setFont(new Font("Arial", Font.ITALIC, 11));
+        spinnerHint.setForeground(Color.GRAY);
+        spinnerPanel.add(spinnerLabel); spinnerPanel.add(regionSpinner); spinnerPanel.add(spinnerHint);
+
+        JPanel legend = new JPanel(new FlowLayout(FlowLayout.CENTER, 10, 2));
+        legend.setBackground(new Color(248, 248, 248));
+        addSwatch(legend, TINT_A, "Partition A (left half)");
+        addSwatch(legend, TINT_B, "Partition B (right half)");
+        addSwatch(legend, new Color(255,255,120,160), "Last colored");
+
+        controls.add(startBtn); controls.add(pauseBtn); controls.add(restartBtn);
+        JPanel south = new JPanel(new GridLayout(3, 1));
+        south.setBackground(new Color(250, 250, 250));
+        south.add(controls); south.add(spinnerPanel); south.add(legend);
+        add(south, BorderLayout.SOUTH);
+
+        stepTimer = new Timer(STEP_DELAY_MS, e -> stepBot());
+        stepTimer.setRepeats(true);
+
+        pack(); setLocationRelativeTo(null);
+    }
+
+    private JButton makeBtn(String text, Color bg) {
+        JButton b = new JButton(text);
+        b.setBackground(bg); b.setForeground(Color.WHITE); b.setOpaque(true);
+        b.setBorderPainted(false); b.setFont(new Font("Arial", Font.BOLD, 13));
+        b.setPreferredSize(new Dimension(120, 36));
+        return b;
+    }
+
+    private JLabel makeLabel(String text, int size, int style, Color fg) {
+        JLabel l = new JLabel(text, SwingConstants.CENTER);
+        l.setFont(new Font("Arial", style, size)); l.setForeground(fg); return l;
+    }
+
+    private void addSwatch(JPanel p, Color c, String label) {
+        JLabel sw = new JLabel("  " + label + "  ");
+        sw.setOpaque(true); sw.setBackground(c);
+        sw.setBorder(BorderFactory.createLineBorder(Color.GRAY));
+        sw.setFont(new Font("Arial", Font.BOLD, 10)); sw.setForeground(Color.BLACK);
+        p.add(sw);
+    }
+
+    // Controls
+    private void onStart() {
+        startBtn.setEnabled(false);
+        pauseBtn.setEnabled(true);
+        statusLabel.setText("Running Divide & Conquer Solver - please wait...");
+        phaseLabel.setText("[D&C] Bisecting graph -> Conquering halves -> Merging seams...");
+
+        new Thread(() -> {
+            boolean ok = botplay.initialize();
+            SwingUtilities.invokeLater(() -> {
+                if (!ok) {
+                    statusLabel.setText("D&C found NO solution - locked regions may conflict.");
+                    appendLog("ERROR: D&C unsolvable.\n");
+                    startBtn.setEnabled(true); pauseBtn.setEnabled(false); return;
+                }
+                appendSolveStats();
+                DivideAndConquerBot s = botplay.getSolver();
+                phaseLabel.setText(String.format(
+                    "[D&C] Solution found! %d moves queued | D&C steps: %d | trials: %d | %d ms",
+                    botplay.getTotalMoves(), s.getReconstructSteps(),
+                    s.getColorTrials(), s.getSolveTimeMs()));
+                moveLabel.setText(String.format(
+                    "Move: 0 / %d   |   Free regions: %d   |   D&C steps: %d",
+                    botplay.getTotalMoves(), s.getFreeCount(), s.getReconstructSteps()));
+
+                // Show initial partition overlay
+                hlA = s.lastPartitionA; hlB = s.lastPartitionB;
+                showOverlay = true;
+                mapPanel.repaint();
+                stepTimer.start();
+            });
+        }).start();
+    }
+
+    private void onPause() {
+        if (!paused) {
+            stepTimer.stop(); paused = true;
+            pauseBtn.setText("Resume");
+            statusLabel.setText("Paused - click Resume to continue");
+        } else {
+            stepTimer.start(); paused = false;
+            pauseBtn.setText("Pause");
+            statusLabel.setText("Resuming...");
+        }
+    }
+
+    private void onRestart() {
+        int newRegions = (Integer) regionSpinner.getValue();
+        stepTimer.stop(); dispose();
+        SwingUtilities.invokeLater(() -> new CooperativeGameGUI(newRegions, 4, 20, 25).setVisible(true));
+    }
+
+    // Step Execution
+    private void stepBot() {
+        if (botplay.isDone()) { stepTimer.stop(); lastColoredRegion=-1; showOverlay=false; onFinished(); return; }
+
+        int[] move = botplay.nextmove();
+        if (move == null) { stepTimer.stop(); onFinished(); return; }
+
+        int rid   = move[0];
+        int color = move[1];
+        lastColoredRegion = rid;
+
+        // Pull updated partition sets that nextmove() just wrote
+        DivideAndConquerBot s = botplay.getSolver();
+        hlA = s.lastPartitionA;
+        hlB = s.lastPartitionB;
+
+        int idx   = botplay.getMoveIndex();
+        int total = botplay.getTotalMoves();
+
+        moveLabel.setText(String.format(
+            "Move: %d / %d   |   Free: %d   |   D&C steps: %d   |   Trials: %d   |   Rejects: %d",
+            idx, total, s.getFreeCount(), s.getReconstructSteps(),
+            s.getColorTrials(), s.getColorRejections()));
+        statusLabel.setText(String.format(
+            "Region %d -> Color %d   |   %d regions remaining", rid, color+1, total-idx));
+        phaseLabel.setText(String.format(
+            "[D&C] Divide->Conquer->Merge | Seam re-solved: %d | Solve: %d ms | MRV pruned: %.1f%%",
+            s.getStatesSkipped(), s.getSolveTimeMs(),
+            s.getColorTrials()==0?0.0:100.0*s.getColorRejections()/s.getColorTrials()));
+        statsLabel.setText(statsText());
+
+        List<String> log = botplay.getMoveLog();
+        if (!log.isEmpty()) appendLog(log.get(log.size()-1) + "\n");
+
+        mapPanel.repaint();
+    }
+
+    private void onFinished() {
+        botplay.printFinalStats();
+        appendFinalStats();
+
+        boolean solved = botplay.isPuzzleSolved();
+        statusLabel.setText(solved ? "Puzzle Solved! All regions colored - no conflicts." : "Finished with conflicts.");
+        phaseLabel.setText("Divide -> Conquer -> Merge complete  |  all moves applied");
+        statsLabel.setText(statsText());
+        startBtn.setEnabled(false); pauseBtn.setEnabled(false);
+        mapPanel.repaint();
+
+        if (solved) {
+            DivideAndConquerBot s = botplay.getSolver();
+            JOptionPane.showMessageDialog(this,
+                "Divide & Conquer Solved the Map!\n\n"
+                + "All regions legally colored - zero conflicts\n\n"
+                + String.format("   Free regions (n)      : %d%n",  s.getFreeCount())
+                + String.format("   Divide + merge steps  : %d%n",  s.getReconstructSteps())
+                + String.format("   Backtrack base calls  : %d%n",  s.getStatesExplored())
+                + String.format("   Seam regions re-solved: %d%n",  s.getStatesSkipped())
+                + String.format("   Color trials          : %d%n",  s.getColorTrials())
+                + String.format("   Rejections (MRV)      : %d  (%.1f%% pruned)%n",
+                    s.getColorRejections(),
+                    s.getColorTrials()==0?0.0:100.0*s.getColorRejections()/s.getColorTrials())
+                + String.format("   Solve time            : %d ms%n", s.getSolveTimeMs()),
+                "Victory!", JOptionPane.INFORMATION_MESSAGE);
+        }
+    }
+
+    private void appendLog(String text) {
+        logArea.append(text);
+        logArea.setCaretPosition(logArea.getDocument().getLength());
+    }
+
+    private void appendSolveStats() {
+        DivideAndConquerBot s = botplay.getSolver();
+        appendLog(String.format(
+            "\n--- D&C SOLVE STATS --------------------------\n" +
+            "   Free regions (n)       : %d\n" +
+            "   Divide + merge steps   : %d\n" +
+            "   Backtrack base calls   : %d\n" +
+            "   Seam regions re-solved : %d\n" +
+            "   Color trials           : %d\n" +
+            "   Color rejections       : %d  (%.1f%% pruned)\n" +
+            "   Solve time             : %d ms\n" +
+            "----------------------------------------------\n",
+            s.getFreeCount(), s.getReconstructSteps(),
+            s.getStatesExplored(), s.getStatesSkipped(),
+            s.getColorTrials(), s.getColorRejections(),
+            s.getColorTrials()==0?0.0:100.0*s.getColorRejections()/s.getColorTrials(),
+            s.getSolveTimeMs()
+        ));
+    }
+
+    private void appendFinalStats() {
+        DivideAndConquerBot s = botplay.getSolver();
+        long conflicts = graph.getRegions().stream().filter(r -> graph.inConflict(r.id)).count();
+        appendLog(String.format(
+            "\n--- FINAL STATS ------------------------------\n" +
+            "   Total moves applied    : %d\n" +
+            "   Conflicts remaining    : %d\n" +
+            "   MRV pruning efficiency : %.1f%%\n" +
+            "   Puzzle solved          : %s\n" +
+            "----------------------------------------------\n",
+            botplay.getTotalMoves(), conflicts,
+            s.getColorTrials()==0?0.0:100.0*s.getColorRejections()/s.getColorTrials(),
+            botplay.isPuzzleSolved() ? "YES" : "NO"
+        ));
+    }
+
+    private String statsText() {
+        int total=graph.getRegions().size(), locked=countLocked(), colored=0, conflicts=0;
+        for (Region r : graph.getRegions()) { if(r.color!=-1){colored++; if(graph.inConflict(r.id)) conflicts++;} }
+        DivideAndConquerBot s = botplay.getSolver();
+        return String.format(
+            "Colored: %d/%d | Locked: %d | Conflicts: %d | D&C steps: %d | Trials: %d | Pruned: %.0f%% | Time: %dms",
+            colored, total, locked, conflicts,
+            s.getReconstructSteps(), s.getColorTrials(),
+            s.getColorTrials()==0?0.0:100.0*s.getColorRejections()/s.getColorTrials(),
+            s.getSolveTimeMs());
+    }
+
+    private void drawMap(Graphics g) {
+        Graphics2D g2 = (Graphics2D) g;
+        g2.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
+        int ox = 50, oy = 50;
+
+        for (Region r : graph.getRegions()) {
+            Color fill = r.color == -1 ? new Color(218, 218, 218) : COLORS[r.color];
+            if (r.id == lastColoredRegion) fill = fill.brighter();
+            for (Cell c : r.cells) {
+                g2.setColor(fill);
+                g2.fillRect(ox + c.col*cellSize, oy + c.row*cellSize, cellSize, cellSize);
+            }
+        }
+
+        if (showOverlay) {
+            for (Region r : graph.getRegions()) {
+                Color tint = hlA.contains(r.id) ? TINT_A : hlB.contains(r.id) ? TINT_B : null;
+                if (tint != null) {
+                    g2.setColor(tint);
+                    for (Cell c : r.cells) g2.fillRect(ox+c.col*cellSize, oy+c.row*cellSize, cellSize, cellSize);
+                }
+            }
+        }
+
+        if (lastColoredRegion >= 0) {
+            g2.setColor(new Color(255, 255, 100, 200)); g2.setStroke(new BasicStroke(3));
+            for (Cell c : graph.getRegions().get(lastColoredRegion).cells)
+                g2.drawRect(ox+c.col*cellSize+1, oy+c.row*cellSize+1, cellSize-2, cellSize-2);
+        }
+
+        g2.setColor(Color.BLACK); g2.setStroke(new BasicStroke(2));
+        for (int row = 0; row < gridRows; row++)
+            for (int col = 0; col < gridCols; col++) {
+                Cell cell = grid[row][col];
+                int x = ox+col*cellSize, y = oy+row*cellSize;
+                if (col<gridCols-1 && grid[row][col+1].regionId!=cell.regionId) g2.drawLine(x+cellSize,y,x+cellSize,y+cellSize);
+                if (row<gridRows-1 && grid[row+1][col].regionId!=cell.regionId) g2.drawLine(x,y+cellSize,x+cellSize,y+cellSize);
+            }
+
+        g2.setFont(new Font("Arial", Font.BOLD, 10));
+        for (Region r : graph.getRegions()) {
+            Point cen = r.getCentroid();
+            int x = ox+cen.x*cellSize+cellSize/2, y = oy+cen.y*cellSize+cellSize/2;
+            if (r.isLocked) {
+                g2.setFont(new Font("Arial", Font.BOLD, 13)); g2.setColor(Color.WHITE);
+                g2.drawString("L", x-5, y+5); g2.setFont(new Font("Arial", Font.BOLD, 10));
+            } else if (r.color == -1) {
+                g2.setColor(Color.DARK_GRAY); g2.drawString(String.valueOf(r.id), x-5, y+5);
+            } else if (graph.inConflict(r.id)) {
+                g2.setColor(Color.RED); g2.setFont(new Font("Arial", Font.BOLD, 15));
+                g2.drawString("X", x-5, y+5); g2.setFont(new Font("Arial", Font.BOLD, 10));
+            } else if (r.id == lastColoredRegion) {
+                g2.setColor(new Color(140, 0, 210)); g2.setFont(new Font("Arial", Font.BOLD, 13));
+                g2.drawString("*", x-3, y+5); g2.setFont(new Font("Arial", Font.BOLD, 10));
+            }
+        }
+    }
+}
+
+public class dc {
+    public static void main(String[] args) {
+        SwingUtilities.invokeLater(() -> {
+            System.out.println("-------------------------------------------------------------");
+            System.out.println("  MAP COLORING - DIVIDE & CONQUER AUTO-SOLVER          ");
+            System.out.println("  Divide  : BFS bisection (pseudo-peripheral pair)        ");
+            System.out.println("  Conquer : Recurse each partition independently          ");
+            System.out.println("  Merge   : Detect & re-solve seam conflicts              ");
+            System.out.println("  Base    : MRV backtracking  (size <= 6)                 ");
+            System.out.println("-------------------------------------------------------------");
+            new CooperativeGameGUI(25, 4, 20, 25).setVisible(true);
+        });
+    }
+}
+
