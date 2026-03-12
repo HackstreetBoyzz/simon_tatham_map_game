@@ -188,4 +188,145 @@ class GameGraph {
     public int            getNumColors()          { return numColors; }
 }
 
+// Bitmask DP Solver
+class BitmaskDPSolver {
+
+    private final GameGraph graph;
+    private final int       numColors;
+
+    private List<Integer> freeIds;
+    private int           n;
+
+    private boolean[] dp;
+    private int[]     parent;
+    private int[]     chosenRegion;
+    private int[]     chosenColor;
+
+    private Map<Integer,Integer> solution = null;
+
+    public Set<Integer> lastPartitionA      = new HashSet<>();
+    public Set<Integer> lastPartitionB      = new HashSet<>();
+    public Set<Integer> lastBoundaryRegions = new HashSet<>();
+
+    // Stats
+    private int  statesExplored   = 0;
+    private int  statesSkipped    = 0;
+    private int  colorTrials      = 0;
+    private int  colorRejections  = 0;
+    private long solveTimeMs      = 0;
+    private int  reconstructSteps = 0;
+
+    private final Map<Integer, int[]> maskColorCache = new HashMap<>();
+
+    public BitmaskDPSolver(GameGraph graph) {
+        this.graph     = graph;
+        this.numColors = graph.getNumColors();
+    }
+
+    public Map<Integer, Integer> solve() {
+        solution        = null;
+        statesExplored  = 0;
+        statesSkipped   = 0;
+        colorTrials     = 0;
+        colorRejections = 0;
+        reconstructSteps= 0;
+        maskColorCache.clear();
+
+        long t0 = System.currentTimeMillis();
+        List<Region> regions = graph.getRegions();
+
+        // Pre-check
+        for (Region r : regions) {
+            if (r.color == -1) continue;
+            for (int nbId : graph.getNeighbors(r.id)) {
+                if (regions.get(nbId).color == r.color) {
+                    System.out.printf("[DP] PRE-CHECK FAIL: Region %d conflicts Region %d%n", r.id, nbId);
+                    solveTimeMs = System.currentTimeMillis() - t0;
+                    return null;
+                }
+            }
+        }
+
+        // Collect free regions
+        freeIds = new ArrayList<>();
+        for (Region r : regions)
+            if (!r.isLocked && r.color == -1) freeIds.add(r.id);
+        n = freeIds.size();
+
+        if (n == 0) { solveTimeMs = System.currentTimeMillis() - t0; return buildFullAssignment(); }
+
+        if (n > 26) {
+            System.out.printf("[DP] n=%d > 26 - fallback to backtracking%n", n);
+            solveTimeMs = System.currentTimeMillis() - t0;
+            return fallbackBacktrack();
+        }
+
+        int size = 1 << n;
+        dp           = new boolean[size];
+        parent       = new int[size];
+        chosenRegion = new int[size];
+        chosenColor  = new int[size];
+        Arrays.fill(parent,       -1);
+        Arrays.fill(chosenRegion, -1);
+        Arrays.fill(chosenColor,  -1);
+
+        dp[0] = true;
+
+        for (int mask = 0; mask < size; mask++) {
+            if (!dp[mask]) continue;
+            statesExplored++;
+
+            int bestBit = -1, bestLegal = Integer.MAX_VALUE;
+            for (int bit = 0; bit < n; bit++) {
+                if ((mask & (1 << bit)) != 0) continue;
+                int legal = countLegalColors(bit, mask);
+                if (legal < bestLegal) { bestLegal = legal; bestBit = bit; }
+            }
+            if (bestBit == -1) continue;
+
+            int bit = bestBit;
+            for (int color = 0; color < numColors; color++) {
+                colorTrials++;
+                if (!isColorValid(bit, color, mask)) { colorRejections++; continue; }
+
+                int newMask = mask | (1 << bit);
+                if (!dp[newMask]) {
+                    dp[newMask]           = true;
+                    parent[newMask]       = mask;
+                    chosenRegion[newMask] = bit;
+                    chosenColor[newMask]  = color;
+                } else {
+                    statesSkipped++;
+                }
+            }
+        }
+
+        int fullMask = size - 1;
+        solveTimeMs = System.currentTimeMillis() - t0;
+
+        if (!dp[fullMask]) return null;
+
+        int[] assignment = new int[n];
+        Arrays.fill(assignment, -1);
+        int cur = fullMask;
+        while (cur != 0) {
+            reconstructSteps++;
+            assignment[chosenRegion[cur]] = chosenColor[cur];
+            cur = parent[cur];
+        }
+
+        for (int bit = 0; bit < n; bit++) {
+            if (assignment[bit] == -1) {
+                System.out.printf("[DP] Reconstruction error: bit %d unassigned!%n", bit);
+                return null;
+            }
+        }
+
+        computePartitions();
+        solution = buildFullAssignment();
+        for (int bit = 0; bit < n; bit++)
+            solution.put(freeIds.get(bit), assignment[bit]);
+
+        return solution;
+    }
 
